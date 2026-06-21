@@ -576,16 +576,26 @@ const Track = (() => {
 // ==========================================================================
 // 6. 车辆类
 // ==========================================================================
+// dtCache：每帧由主循环 animate() 更新的全局 dt，供 _syncMesh 等方法读取。
+// 在此声明以避免「使用早于声明」的前向引用（原写法将其放在类定义之后）。
+let dtCache = 0;
+
 class Vehicle {
   constructor(opts) {
     this.isPlayer = !!opts.isPlayer;
     this.name = opts.name || 'Racer';
     this.color = opts.color !== undefined ? opts.color : 0xff3344;
-    this.t = opts.t || 0;          // 赛道进度
+    this.t = opts.t || 0;          // 赛道进度（本圈内的 0~1 参数）
     this.lap = 0;
     this.lapStartTime = 0;
     this.lapTimes = [];
     this.bestLap = Infinity;
+    // —— 稳健的圈数检测：用「连续累计进度」而非单帧 t 跨越 ——
+    // progress = lap + t，单调反映车辆沿赛道的前进/后退，杜绝倒车/打转误判一圈
+    this.progress = this.lap + this.t;
+    this.prevProgress = this.progress;
+    this._lapsCounted = 0;        // 已计数的整数圈数（floor(progress) 基准）
+    this._crossedStart = false;   // 是否已首次穿过起点线
     this.sideOffset = opts.sideOffset || 0;  // 横向偏移（车道）
     this.pos = new THREE.Vector3();
     this.heading = 0;              // 朝向（弧度）
@@ -664,6 +674,13 @@ class Vehicle {
     this.stun = 0; this.spin = 0; this.boost = 0; this.shielded = false; this.magnet = 0;
     this.finished = false; this.item = null; this.itemCooldown = 0;
     this.sideOffset = sideOffset || 0;
+    // —— 重置连续进度圈数检测状态 ——
+    // 起跑网格在终点线后方(t≈0.98)，progress 初始化为 0.98，
+    // _lapsCounted=0：首次前进跨过 1.0 时即「首次过线」，再跨过 2.0 完成 第 1 圈。
+    this.progress = this.lap + this.t;
+    this.prevProgress = this.progress;
+    this._lapsCounted = 0;
+    this._crossedStart = false;
     const s = Track.sampleAt(t);
     this.pos = s.pos.clone().addScaledVector(s.side, this.sideOffset);
     this.heading = Math.atan2(s.tangent.x, s.tangent.z);
@@ -739,27 +756,40 @@ class Vehicle {
       this.pos.addScaledVector(toCenter.normalize(), 6*dt);
     }
 
-    // 圈数/进度更新
+    // 圈数/进度更新 —— 用「连续累计进度」判定过线，杜绝倒车/打转误判
     const prevT = this.t;
     this.t = near.t;
-    // 检测过线（t 从大跳到小 ~ 跨越 1.0，即穿过 t=0 终点线）
-    const crossedForward = prevT > 0.7 && this.t < 0.3 && (prevT - this.t > 0.3 || (prevT > 0.9 && this.t < 0.1));
-    if (crossedForward && !this.finished) {
-      if (!this._crossedStart) {
-        // 首次过线（从起跑网格冲过终点线），不计圈，仅标记
-        this._crossedStart = true;
-        this.lapStartTime = performance.now();
-      } else {
-        this.lap++;
-        const now = performance.now();
-        const lt = (now - (this.lapStartTime||STATE.startTime)) / 1000;
-        this.lapTimes.push(lt); if (lt < this.bestLap) this.bestLap = lt;
-        this.lapStartTime = now;
-        if (this.lap >= CFG.laps) {
-          this.finished = true; this.finishTime = (now - STATE.startTime)/1000;
-        } else if (this.isPlayer) {
-          showToast(`第 ${this.lap} 圈完成！`, '#ffd166');
-          Audio.sfx.pickup();
+    // 计算本帧「有向」前进量（正确处理 t 在 0/1 处的环绕）：
+    //   把 (this.t - prevT) 归一化到 [-0.5, 0.5]：>0 前进，<0 倒退。
+    //   这样无论是否跨过终点线，前进量的符号和大小都正确，不依赖 lap 自增时序。
+    let delta = this.t - prevT;
+    if (delta > 0.5)  delta -= 1;        // 例 prevT=0.99, t=0.01 → -0.98+1... 实为前进而被误判，修正
+    else if (delta < -0.5) delta += 1;   // 例 prevT=0.01, t=0.99 → 0.98-1=-0.02，实为倒退
+    // 仅累计「真正前进」的量；倒退则让 progress 跟随当前 (lap+t)，不奖励倒车/打转
+    if (delta > 0) this.progress += delta;
+    else           this.progress = this.lap + this.t;
+    // 完成「一圈」= 累计进度跨过一个整数边界（向前）。floor(progress) 增加即过线一次。
+    const newLaps = Math.floor(this.progress) - this._lapsCounted;
+    if (newLaps > 0 && !this.finished) {
+      for (let k = 0; k < newLaps; k++) {
+        this._lapsCounted += 1;
+        if (!this._crossedStart) {
+          // 首次过线（从起跑网格冲过终点线），不计圈，仅标记开始计时
+          this._crossedStart = true;
+          this.lapStartTime = performance.now();
+        } else {
+          this.lap++;
+          const now = performance.now();
+          const lt = (now - (this.lapStartTime||STATE.startTime)) / 1000;
+          this.lapTimes.push(lt); if (lt < this.bestLap) this.bestLap = lt;
+          this.lapStartTime = now;
+          if (this.lap >= CFG.laps) {
+            this.finished = true; this.finishTime = (now - STATE.startTime)/1000;
+            break;
+          } else if (this.isPlayer) {
+            showToast(`第 ${this.lap} 圈完成！`, '#ffd166');
+            Audio.sfx.pickup();
+          }
         }
       }
     }
@@ -819,7 +849,6 @@ class Vehicle {
     if (this.wheels) for (const w of this.wheels) w.rotation.x += this.speed * dtCache * 0.4;
   }
 }
-let dtCache = 0;
 
 // ==========================================================================
 // 7. 道具系统
@@ -1234,13 +1263,12 @@ function updateRanking() {
   racers.sort((a,b) => progressOf(b) - progressOf(a));
   for (let i = 0; i < racers.length; i++) racers[i].rank = i+1;
 }
-// 计算车辆总进度（用于排名）。未首次过线时，起跑位置 t>0.9 视作负偏移
+// 计算车辆总进度（用于排名）。直接复用连续累计的 progress：
+//   - 起跑时 t≈0.98 → progress≈0.98，前排(t大)自然靠前；
+//   - 过线后 progress=1.x、2.x 单调反映真实圈+进度；
+//   - 倒车时 progress 跟随后退，排名相应下降（公平）。
 function progressOf(v) {
-  if (!v._crossedStart && v.t > 0.5) {
-    // 起跑网格在终点线后方(t≈0.98)，换算成负进度
-    return v.lap + (v.t - 1);
-  }
-  return v.lap + v.t;
+  return v.progress;
 }
 
 function checkCollision() {
