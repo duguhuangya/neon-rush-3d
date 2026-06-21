@@ -1,5 +1,7 @@
 # 🏎️ NEON RUSH · 极速狂飙 3D
 
+![status](https://img.shields.io/badge/status-released-success) ![license](https://img.shields.io/badge/license-MIT-blue) ![engine](https://img.shields.io/badge/engine-Three.js-r0.180-orange)
+
 > 一款基于 **Three.js** 的浏览器 3D 赛车游戏，单 HTML 文件即可运行，零安装、零依赖（除 CDN 加载的 Three.js）。
 
 内置 **6 种酷炫道具**、**暴力摩托式的干扰破坏机制**（EMP 电磁脉冲、追踪导弹、油渍陷阱……）、**4 段动态切换的赛道场景**、**程序合成的电子音乐与音效**，以及带橡皮筋机制的 AI 对手。完整体验「开始 → 3 圈竞速 → 结算」流程。
